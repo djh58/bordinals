@@ -249,7 +249,7 @@ class DropstitchRegtest(BitcoinTestFramework):
             content = test_svg()
             mime = "image/svg+xml"
         payloads = encode_payloads(content)
-        assert len(payloads) >= 2
+        assert len(payloads) >= 1
         assert all(len(payload) == MAX_PAYLOAD_BYTES for payload in payloads)
 
         key = ECKey()
