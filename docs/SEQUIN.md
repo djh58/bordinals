@@ -4,6 +4,10 @@ SEQUIN means **SEQU**ence **IN**scription. Version 1 is a deliberately small,
 canonical transport intended for experimentation on an RDTS-active Bitcoin
 Knots chain.
 
+The codec treats content as opaque bytes, so images work without a special
+format. In practice its four-bytes-per-input density makes tiny SVGs, pixel art,
+thumbnails, or hashes more realistic than ordinary PNG/JPEG photographs.
+
 ## Transaction shape
 
 The reveal transaction must use transaction version 1 and `nLockTime=0`. It
