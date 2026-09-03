@@ -56,7 +56,8 @@ from sequin import (  # noqa: E402
 )
 
 
-VBPARAMS_RDTS_ALWAYS_ACTIVE = "-vbparams=reduced_data:-1:999999999999:0"
+BLAKE2B_ALWAYS_ACTIVE = "-testactivationheight=blake2b@1"
+RDTS_FUTURE_EXPIRY = "-rdtsexpiry=2000000000"
 FANOUT_VALUE = Decimal("0.00100000")
 CLEANUP_FEE = Decimal("0.00010000")
 
@@ -85,8 +86,8 @@ class SequinRegtest(BitcoinTestFramework):
         # (-datacarrier*, -acceptnonstddatacarrier, -corepolicy, etc.) remain at
         # the compiled Bitcoin Knots defaults on both nodes.
         self.extra_args = [
-            [VBPARAMS_RDTS_ALWAYS_ACTIVE, "-corepolicy=0"],
-            [VBPARAMS_RDTS_ALWAYS_ACTIVE, "-corepolicy=0"],
+            [BLAKE2B_ALWAYS_ACTIVE, RDTS_FUTURE_EXPIRY, "-corepolicy=0"],
+            [BLAKE2B_ALWAYS_ACTIVE, RDTS_FUTURE_EXPIRY, "-corepolicy=0"],
         ]
 
     def skip_test_if_missing_module(self):
@@ -151,8 +152,13 @@ class SequinRegtest(BitcoinTestFramework):
     def run_test(self):
         sender, relay = self.nodes
 
-        deployment = sender.getdeploymentinfo()["deployments"]["reduced_data"]
-        assert_equal(deployment["bip9"]["status"], "active")
+        info = sender.getdeploymentinfo()
+        assert_equal(info["blake2b"], {"height": 1, "active": True})
+        deployment = info["deployments"]["reduced_data"]
+        assert_equal(deployment["type"], "flagday")
+        assert_equal(deployment["height"], 1)
+        assert_equal(deployment["expiry_time"], 2_000_000_000)
+        assert_equal(deployment["active"], True)
         self.log.info("RDTS is active; both nodes retain untouched Knots relay defaults")
 
         self.generate(sender, 101)
