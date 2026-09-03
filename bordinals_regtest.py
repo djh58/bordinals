@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""End-to-end DROPSTITCH proof on two default-policy, RDTS-active Knots nodes.
+"""End-to-end BORDINALS proof on two default-policy, RDTS-active Knots nodes.
 
 This test intentionally uses the Bitcoin Knots functional test framework.  It
-proves the current policy seam DROPSTITCH relies on; it is not a promise that a
+proves the current policy seam BORDINALS relies on; it is not a promise that a
 future Knots release will continue relaying OP_2DROP carriers.
 """
 
@@ -59,13 +59,13 @@ from test_framework.script import (  # noqa: E402
     OP_CHECKSIG,
     OP_DROP,
     OP_RETURN,
-    SIGHASH_ALL,
-    SegwitV0SignatureHash,
+    UnifiedSignatureHash,
 )
 from test_framework.test_framework import BitcoinTestFramework  # noqa: E402
 from test_framework.util import assert_equal  # noqa: E402
 
-from dropstitch import (  # noqa: E402
+from bordinals import (  # noqa: E402
+    BORDINALS_SIGHASH,
     MAX_PAYLOAD_BYTES,
     build_manifest,
     build_script,
@@ -77,11 +77,12 @@ from dropstitch import (  # noqa: E402
 )
 
 
-VBPARAMS_RDTS_ALWAYS_ACTIVE = "-vbparams=reduced_data:-1:999999999999:0"
+BLAKE2B_ALWAYS_ACTIVE = "-testactivationheight=blake2b@1"
+RDTS_FUTURE_EXPIRY = "-rdtsexpiry=2000000000"
 MAX_DEFAULT_WITNESS_BYTES = 1650
 MAX_P2WSH_SCRIPT_BYTES = 3600
 MAX_NON_SCRIPT_WITNESS_ITEM_BYTES = 80
-MAX_STANDARD_STRESS_INPUTS = 220
+MAX_STANDARD_STRESS_INPUTS = 221
 
 CARRIER_VALUE_SATS = 250_000
 CLEANUP_FEE_SATS = 10_000
@@ -104,7 +105,7 @@ def test_svg() -> bytes:
         '<rect width="340" height="300" rx="24" fill="#161629"/>'
         + "".join(stitches)
         + '<text x="170" y="285" text-anchor="middle" font-family="monospace" '
-        'font-size="18" fill="white">DROPSTITCH #1</text></svg>'
+        'font-size="18" fill="white">BORDINALS #1</text></svg>'
     ).encode("ascii")
     assert len(image) > MAX_PAYLOAD_BYTES
     return image
@@ -127,7 +128,7 @@ def extract_single_op_return(decoded_tx: dict) -> bytes:
     return operations[1][1]
 
 
-class DropstitchRegtest(BitcoinTestFramework):
+class BordinalsRegtest(BitcoinTestFramework):
     def add_options(self, parser):
         self.add_wallet_options(parser, descriptors=True, legacy=False)
         parser.add_argument(
@@ -136,7 +137,7 @@ class DropstitchRegtest(BitcoinTestFramework):
             default=0,
             help=(
                 "replace the SVG with deterministic binary content requiring "
-                "exactly N carrier inputs (maximum tested relay boundary: 220; "
+                "exactly N carrier inputs (maximum tested relay boundary: 221; "
                 "177 conservatively fits the default block-template byte target)"
             ),
         )
@@ -148,8 +149,8 @@ class DropstitchRegtest(BitcoinTestFramework):
         # convenience so the nodes exercise compiled Knots policy.  No
         # datacarrier, standardness, script-size, or witness-size knobs change.
         self.extra_args = [
-            [VBPARAMS_RDTS_ALWAYS_ACTIVE, "-corepolicy=0"],
-            [VBPARAMS_RDTS_ALWAYS_ACTIVE, "-corepolicy=0"],
+            [BLAKE2B_ALWAYS_ACTIVE, RDTS_FUTURE_EXPIRY, "-corepolicy=0"],
+            [BLAKE2B_ALWAYS_ACTIVE, RDTS_FUTURE_EXPIRY, "-corepolicy=0"],
         ]
 
     def skip_test_if_missing_module(self):
@@ -169,9 +170,9 @@ class DropstitchRegtest(BitcoinTestFramework):
         return matches[0]
 
     def assert_op_drop_policy_control(self, sender, relay, key, pubkey):
-        """Prove literal OP_DROP is rejected where DROPSTITCH's OP_2DROP passes."""
+        """Prove literal OP_DROP is rejected where BORDINALS's OP_2DROP passes."""
         control_script = CScript(
-            [b"DROPSTITCH control", OP_DROP, pubkey, OP_CHECKSIG]
+            [b"BORDINALS control", OP_DROP, pubkey, OP_CHECKSIG]
         )
         control_address = script_to_p2wsh(control_script)
         carrier_value = Decimal(CARRIER_VALUE_SATS) / COIN
@@ -197,10 +198,21 @@ class DropstitchRegtest(BitcoinTestFramework):
             )
         ]
         spend.wit.vtxinwit = [CTxInWitness()]
-        sighash = SegwitV0SignatureHash(
-            control_script, spend, 0, SIGHASH_ALL, CARRIER_VALUE_SATS
+        spent_utxo = CTxOut(
+            CARRIER_VALUE_SATS,
+            address_to_scriptpubkey(control_address),
         )
-        signature = key.sign_ecdsa(sighash, rfc6979=True) + bytes([SIGHASH_ALL])
+        sighash = UnifiedSignatureHash(
+            control_script,
+            spend,
+            0,
+            BORDINALS_SIGHASH,
+            [spent_utxo],
+            True,
+        )
+        signature = key.sign_ecdsa(sighash, rfc6979=True) + bytes(
+            [BORDINALS_SIGHASH]
+        )
         spend.wit.vtxinwit[0].scriptWitness.stack = [signature, control_script]
         rejection = sender.testmempoolaccept([spend.serialize().hex()])[0]
         assert_equal(rejection["allowed"], False)
@@ -223,8 +235,13 @@ class DropstitchRegtest(BitcoinTestFramework):
         sender, relay = self.nodes
 
         for node in self.nodes:
-            deployment = node.getdeploymentinfo()["deployments"]["reduced_data"]
-            assert_equal(deployment["bip9"]["status"], "active")
+            info = node.getdeploymentinfo()
+            assert_equal(info["blake2b"], {"height": 1, "active": True})
+            deployment = info["deployments"]["reduced_data"]
+            assert_equal(deployment["type"], "flagday")
+            assert_equal(deployment["height"], 1)
+            assert_equal(deployment["expiry_time"], 2_000_000_000)
+            assert_equal(deployment["active"], True)
         self.log.info(
             "RDTS is active; both nodes use Knots defaults with harness "
             "-corepolicy explicitly disabled"
@@ -241,7 +258,7 @@ class DropstitchRegtest(BitcoinTestFramework):
             # carrier index must still produce distinct scripts, addresses,
             # and outpoints for every reveal input.
             repeated_payload = hashlib.shake_256(
-                b"DROPSTITCH repeated stress carrier"
+                b"BORDINALS repeated stress carrier"
             ).digest(MAX_PAYLOAD_BYTES)
             content = repeated_payload * self.options.stress_inputs
             mime = "application/octet-stream"
@@ -256,7 +273,7 @@ class DropstitchRegtest(BitcoinTestFramework):
         # Stable test-only secret; the functional framework key implementation
         # is explicitly not suitable for production key custody.
         key.set(
-            hashlib.sha256(b"DROPSTITCH regtest signing key").digest(),
+            hashlib.sha256(b"BORDINALS regtest signing key").digest(),
             compressed=True,
         )
         pubkey = key.get_pubkey().get_bytes()
@@ -291,7 +308,10 @@ class DropstitchRegtest(BitcoinTestFramework):
         manifest = parse_manifest(manifest_bytes)
         assert_equal(manifest.input_count, len(scripts))
         assert_equal(manifest.pointer_vout, 0)
-        assert_equal(manifest.content_sha256, hashlib.sha256(content).digest())
+        assert_equal(
+            manifest.content_blake2b256,
+            hashlib.blake2b(content, digest_size=32).digest(),
+        )
         assert len(manifest_bytes) <= 80
         self.log.info(
             f"Encoding {len(content)} bytes ({mime}) in {len(scripts)} authenticated "
@@ -361,11 +381,22 @@ class DropstitchRegtest(BitcoinTestFramework):
             CTxOut(0, CScript([OP_RETURN, manifest_bytes])),
         ]
         reveal.wit.vtxinwit = [CTxInWitness() for _ in reveal.vin]
+        spent_utxos = [
+            CTxOut(CARRIER_VALUE_SATS, CScript(scriptpubkey))
+            for scriptpubkey in carrier_scriptpubkeys
+        ]
         for index, script in enumerate(scripts):
-            sighash = SegwitV0SignatureHash(
-                script, reveal, index, SIGHASH_ALL, CARRIER_VALUE_SATS
+            sighash = UnifiedSignatureHash(
+                script,
+                reveal,
+                index,
+                BORDINALS_SIGHASH,
+                spent_utxos,
+                True,
             )
-            signature = key.sign_ecdsa(sighash, rfc6979=True) + bytes([SIGHASH_ALL])
+            signature = key.sign_ecdsa(sighash, rfc6979=True) + bytes(
+                [BORDINALS_SIGHASH]
+            )
             reveal.wit.vtxinwit[index].scriptWitness.stack = [signature, script]
         reveal_hex = reveal.serialize().hex()
 
@@ -376,6 +407,10 @@ class DropstitchRegtest(BitcoinTestFramework):
         witness_sizes = []
         for witness in parsed_reveal.wit.vtxinwit:
             assert_equal(len(witness.scriptWitness.stack), 2)
+            assert_equal(
+                witness.scriptWitness.stack[0][-1],
+                BORDINALS_SIGHASH,
+            )
             assert (
                 len(witness.scriptWitness.stack[0])
                 <= MAX_NON_SCRIPT_WITNESS_ITEM_BYTES
@@ -409,7 +444,7 @@ class DropstitchRegtest(BitcoinTestFramework):
         acceptance = sender.testmempoolaccept([reveal_hex])[0]
         assert_equal(acceptance["allowed"], True)
         self.log.info(
-            "RDTS/default-policy testmempoolaccept allowed DROPSTITCH reveal: "
+            "RDTS/default-policy testmempoolaccept allowed BORDINALS reveal: "
             f"vsize={acceptance['vsize']}, fees={acceptance['fees']}"
         )
 
@@ -434,10 +469,13 @@ class DropstitchRegtest(BitcoinTestFramework):
             expected_pubkey=pubkey,
         )
         assert_equal(recovered, content)
-        assert_equal(hashlib.sha256(recovered).digest(), manifest.content_sha256)
+        assert_equal(
+            hashlib.blake2b(recovered, digest_size=32).digest(),
+            manifest.content_blake2b256,
+        )
         assert_equal(parse_manifest(manifest_from_wire).mime, mime)
         self.log.info(
-            f"Wire content ({mime}) reconstructed byte-for-byte and SHA256-verified"
+            f"Wire content ({mime}) reconstructed and BLAKE2b-256-verified"
         )
 
         self.generate(sender, 1)
@@ -496,4 +534,4 @@ class DropstitchRegtest(BitcoinTestFramework):
 
 
 if __name__ == "__main__":
-    DropstitchRegtest(__file__).main()
+    BordinalsRegtest(__file__).main()

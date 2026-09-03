@@ -1,83 +1,77 @@
-# Knotscribe
+# BORDINALS
 
-**Knotscribe** is a research repository for inscription-like data transports on
-Bitcoin Knots with BIP-110/RDTS active. It aims to tie data into transactions
-without tying up permanent junk UTXOs.
+**BORDINALS** is a proof-of-concept inscription/NFT data transport for Bitcoin
+Knots with BIP-110/RDTS active. The name combines **BLAKE2b** with **ordinals**.
+It carries arbitrary bytes—including SVG, PNG, JPEG, GIF, and WebP—without
+leaving permanent carrier UTXOs.
 
 > [!WARNING]
 > This is experimental research, not a production NFT protocol. Relay policy is
 > version- and operator-dependent. Validate every construction against the exact
 > Knots revision and configuration you intend to use.
 
-The repository contains two related designs:
+The repository contains two designs:
 
-| Design | Status | Capacity | Current-policy posture |
-|---|---|---:|---|
-| **SEQUIN** — **SEQU**ence **IN**scription | Implemented and regtest-verified | 4 bytes/input | Uses ordinary input metadata and one standard OP_RETURN manifest |
-| **DROPSTITCH** | Implemented and regtest-verified | 1,500 bytes/input | Relies on a narrow `OP_2DROP` scanner gap; deliberately brittle |
+| Design | Capacity | Tradeoff |
+|---|---:|---|
+| **BORDINALS** | 1,500 bytes/input | Dense authenticated P2WSH carriers; relies on a narrow `OP_2DROP` policy-scanner gap |
+| **SEQUIN** — **SEQU**ence **IN**scription | 4 bytes/input | Conservative ordinary-input metadata; expensive and low-density |
 
-SEQUIN is the conservative design. DROPSTITCH is 375 times denser and has a
-working authenticated P2WSH implementation, but it is intentionally not
-presented as stable or future-proof.
+BORDINALS is 375 times denser and is the main implementation. SEQUIN remains as
+a conservative comparison. BORDINALS v1 supersedes the earlier experimental
+DROPSTITCH namespace and intentionally does not decode old `DSTC`/`DST1` data.
 
-## How SEQUIN works
+## How BORDINALS works
 
-1. A fanout transaction creates `ceil(payload_bytes / 4)` ordinary,
-   wallet-controlled outputs.
-2. A version-1 reveal transaction with `nLockTime=0` spends them in a defined
-   order. Each input's full 32-bit `nSequence` carries four bytes in transaction
-   wire order.
-3. Output 0 is an ordinary spendable P2TR ownership pointer. A second output is
-   an at-most-80-byte OP_RETURN manifest containing framing, MIME type, exact
-   length, and SHA-256.
-4. A decoder reads the confirmed transaction, reconstructs the selected input
-   sequences, removes canonical zero padding, and verifies the hash.
+1. Split the file into 1,500-byte carriers made from six 250-byte pushes.
+2. Pair each two pushes with `OP_2DROP`, then require a compressed-key
+   `OP_CHECKSIG`. Each P2WSH carrier is committed and authenticated.
+3. Anchor one `BORD` manifest in both the funding and reveal transactions. It
+   records framing, MIME type, exact length, and BLAKE2b-256 content digest.
+4. Spend every carrier with Knots' unified SIGHASH_ALL (`0x21`) into an ordinary
+   P2TR ownership pointer plus the repeated manifest.
+5. Reconstruct the bytes from the consensus-validated reveal and verify the
+   manifest digest.
 
-No fake keys, witness envelopes, burned outputs, or permanent carrier UTXOs are
-required. The tradeoff is poor density: every four payload bytes require one
-funded and signed input.
+The P2WSH output still uses `SHA256(witnessScript)`. That is a SegWit-v0
+consensus rule and was not changed by Knots' BLAKE2b proof-of-work fork.
 
-Both transports accept arbitrary bytes, so SVG, PNG, JPEG, GIF, and WebP are no
-different from text to the codec. SEQUIN's low capacity favors tiny SVGs, pixel
-art, or hashes. DROPSTITCH can fit roughly 330 KB in a conservative
-near-standard-weight reveal, subject to fees and policy remaining unchanged.
-That 330 KB transaction is relay-standard and consensus-valid, but larger than
-Knots' separate default 300 kB block-template byte target.
+## How SEQUIN differs
 
-See [the SEQUIN protocol note](docs/SEQUIN.md) and
-[the DROPSTITCH protocol note](docs/DROPSTITCH.md) for details.
+SEQUIN stores four bytes in each input's `nSequence`, then uses a standard
+OP_RETURN manifest and ordinary P2TR ownership output. It does not depend on the
+`OP_2DROP` scanner seam, but a 524-byte SVG needs 131 funded and signed inputs.
+Its independent v1 namespace continues using SHA-256.
+
+Both codecs treat images as opaque bytes. BORDINALS is practical for larger
+images: this transaction shape guarantees that 221 inputs carrying 331,500
+bytes remain under the current 400 kWU standard-transaction ceiling. SEQUIN is
+better suited to tiny SVGs, pixel
+art, thumbnails, or content hashes.
+
+See [the BORDINALS protocol note](docs/BORDINALS.md) and
+[the SEQUIN protocol note](docs/SEQUIN.md) for the exact wire rules.
 
 ## Quick start
 
-The codec uses only Python's standard library:
+The codecs use only Python's standard library:
 
 ```sh
-python3 -m unittest -v test_sequin.py test_dropstitch.py
-python3 sequin.py encode ./art.svg --mime image/svg+xml
-python3 dropstitch.py encode ./art.svg \
+python3 -m unittest -v test_sequin.py test_bordinals.py
+
+python3 bordinals.py encode ./art.svg \
   --mime image/svg+xml \
   --pubkey "$COMPRESSED_PUBKEY_HEX"
 ```
 
-Each `encode` command prints a manifest, standard OP_RETURN script, and carrier
-values as JSON. DROPSTITCH requires that exact manifest OP_RETURN in both the
-common funding transaction and reveal transaction. The supplied compressed
-secp256k1 key must be a key you control; the codec builds committed scripts but
-deliberately does not manage private keys or broadcast transactions.
+The encoder prints the binary manifest, standard OP_RETURN script, carrier
+witnessScripts, and P2WSH scriptPubKeys as JSON. It deliberately does not manage
+private keys, construct funding transactions, or broadcast.
 
-Decode a SEQUIN artifact back to a file with:
+Decode consensus-validated BORDINALS witness stacks with:
 
 ```sh
-python3 sequin.py decode \
-  --manifest MANIFEST_HEX \
-  --output recovered.svg \
-  0x01234567 0x89abcdef
-```
-
-Or decode DROPSTITCH witness scripts with:
-
-```sh
-python3 dropstitch.py decode \
+python3 bordinals.py decode \
   --funding-manifest MANIFEST_HEX \
   --reveal-manifest MANIFEST_HEX \
   --pubkey "$COMPRESSED_PUBKEY_HEX" \
@@ -85,86 +79,106 @@ python3 dropstitch.py decode \
   SIGNATURE_HEX:WITNESS_SCRIPT_HEX [...]
 ```
 
-The two manifest arguments must be extracted independently from the common
-funding transaction and the reveal. Supply witness stacks only from a reveal
-that a full node has consensus-validated: the standalone codec checks canonical
-DER/low-S/`SIGHASH_ALL` framing and the content hash, but intentionally does not
-implement Bitcoin transaction parsing, prevout ancestry, or ECDSA evaluation.
+The manifests must be independently extracted from the common funding
+transaction and reveal. The standalone decoder checks their byte identity,
+strict DER/low-S/`0x21` framing, carrier shape, and BLAKE2b-256. It intentionally
+does not implement transaction parsing, prevout ancestry, or ECDSA evaluation;
+feed it only witnesses already validated by a full node.
 
-## Run the two-node Knots proof
-
-Build a checkout of the Knots `29.x-knots` line with RDTS consent:
+SEQUIN's CLI remains available:
 
 ```sh
-cd /path/to/bitcoin-knots
-cmake -S . -B build-knotscribe -GNinja \
-  -D RDTS_CONSENT=IMPLICIT \
+python3 sequin.py encode ./tiny.svg --mime image/svg+xml
+python3 sequin.py decode \
+  --manifest MANIFEST_HEX \
+  --output recovered.svg \
+  0x01234567 0x89abcdef
+```
+
+## Run the latest-Knots proof
+
+The current verification target is Bitcoin Knots
+`v29.4.1.knots20260508` (`8c85b1585dac23f964e2dd32045624de7f02aa58`).
+
+```sh
+git clone https://github.com/bitcoinknots/bitcoin.git bitcoin-knots
+cd bitcoin-knots
+git checkout v29.4.1.knots20260508
+
+cmake -S . -B build-bordinals -GNinja \
   -D BUILD_GUI=OFF \
   -D BUILD_TESTS=OFF \
   -D BUILD_BENCH=OFF \
   -D BUILD_UTIL=OFF \
   -D BUILD_TX=OFF \
   -D BUILD_WALLET_TOOL=OFF
-cmake --build build-knotscribe -j 8 --target bitcoind bitcoin-cli
+cmake --build build-bordinals -j 8 --target bitcoind bitcoin-cli
 ```
 
 Then, from this repository:
 
 ```sh
 BITCOIN_KNOTS_REPO=/path/to/bitcoin-knots \
-python3 sequin_regtest.py \
-  --configfile=/path/to/bitcoin-knots/build-knotscribe/test/config.ini \
+python3 bordinals_regtest.py \
+  --configfile=/path/to/bitcoin-knots/build-bordinals/test/config.ini \
   --loglevel=INFO
 
 BITCOIN_KNOTS_REPO=/path/to/bitcoin-knots \
-python3 dropstitch_regtest.py \
-  --configfile=/path/to/bitcoin-knots/build-knotscribe/test/config.ini \
+python3 sequin_regtest.py \
+  --configfile=/path/to/bitcoin-knots/build-bordinals/test/config.ini \
   --loglevel=INFO
 ```
 
-The tests start two connected nodes, activate RDTS on regtest, and explicitly
-restore Knots policy with `-corepolicy=0` because the upstream functional-test
-harness otherwise injects Core policy. It proves:
+The tests start two connected nodes with BLAKE2b/RDTS active and compiled Knots
+relay defaults. They set `-corepolicy=0` only because Knots' functional harness
+otherwise injects Core policy. They prove:
 
-- fanout and reveal relay to a second default-policy node;
-- byte-identical DROPSTITCH manifests in funding and reveal;
-- reveal acceptance by `testmempoolaccept`;
-- byte-exact reconstruction and SHA-256 verification from signed wire data;
-- consumption of every fanout output into one ordinary P2TR pointer; and
-- a standard subsequent spend of that pointer.
+- default-policy funding and reveal relay to a second peer;
+- the funding and reveal carry byte-identical BORDINALS manifests;
+- the reveal uses unified `0x21` signatures and passes `testmempoolaccept`;
+- the image reconstructs byte-for-byte and passes BLAKE2b-256 verification;
+- all temporary carriers are consumed into one spendable P2TR pointer; and
+- the pointer can be relayed, mined, and swept normally.
 
-Each also proves the policy/consensus boundary with a literal `OP_DROP` P2WSH
-negative control. It is rejected from the mempool as
-`txn-datacarrier-nonstandard`, yet accepted when directly included in an
-RDTS-active block; DROPSTITCH's control additionally requires a valid signature.
+Each proof also constructs a literal `<data> OP_DROP` P2WSH control. Knots
+rejects it from the mempool as `txn-datacarrier-nonstandard`, then accepts the
+same transaction when explicitly included in an RDTS-valid block. This brackets
+the policy/consensus distinction that BORDINALS relies on.
 
-For capacity exercises, SEQUIN accepts `--stress-inputs=1650` (6,600 bytes).
-DROPSTITCH accepts `--stress-inputs=177` for a conservatively default-template-
-mineable 265,500-byte reveal, or `--stress-inputs=220` for a 330,000-byte reveal
-that is relay-standard and consensus-valid but exceeds the compiled 300 kB
-block-template byte target. Confirming the fanout before a large reveal is
-important because an unconfirmed pair can exceed default ancestor-size policy.
+Capacity exercises:
+
+```sh
+# Reliably selected by the default 300 kB template target:
+python3 bordinals_regtest.py ... --stress-inputs=177
+
+# Largest conservatively guaranteed-standard case; explicitly mined after relay:
+python3 bordinals_regtest.py ... --stress-inputs=221
+```
+
+Confirming the carrier funding transaction before a large reveal is important:
+an unconfirmed pair can exceed default ancestor-package policy.
 
 ## Verified scope
 
-The included proofs were run on 2026-08-12 against Bitcoin Knots commit
-`2d531eaf4b0801278b3e928cf9df3b3852001d0a` from `origin/29.x-knots` and its
-compiled policy defaults.
+On 2026-09-03 the included proofs passed against the latest official Knots
+release, `v29.4.1.knots20260508`, at commit
+`8c85b1585dac23f964e2dd32045624de7f02aa58`:
 
-- SEQUIN's 524-byte SVG used 131 inputs.
-- DROPSTITCH's 5,025-byte SVG used four authenticated P2WSH inputs whose complete
-  signed witnesses were at most 1,638 bytes under the 1,650-byte default ceiling.
-- A 177-input/265,500-byte DROPSTITCH reveal was selected by the default block
-  template. A 220-input/330,000-byte reveal was accepted and relayed at about
-  396.9 kWU, then explicitly included to prove consensus after the default
-  300 kB template target left its roughly 369.4 kB serialization in the mempool.
+- The 5,024-byte SVG used four carriers, relayed across two default-policy
+  nodes, reconstructed exactly, confirmed, and left a spendable P2TR pointer.
+- The 177-input/265,500-byte reveal relayed and was selected by the default
+  template at 297,223 serialized bytes and 319,405 WU.
+- The 221-input/331,500-byte reveal relayed at 371,088 serialized bytes and
+  398,682 WU. The 300 kB template target left it in the mempool, after which
+  explicit block inclusion proved consensus acceptance under RDTS' 800 kWU cap.
+- SEQUIN's 524-byte/131-input image proof still relayed, reconstructed, and
+  swept successfully on the same release.
 
-Both relayed between two nodes, reconstructed exactly, consumed every temporary
-carrier, left one spendable P2TR output, and successfully swept that output.
-
-That demonstrates behavior for the tested revision. It does not promise that a
-future release, a differently configured peer, or a miner will retain the same
-policy.
+This demonstrates the tested revision and defaults; it does not promise a
+future release, differently configured peer, or miner will preserve the policy
+seam. A real transaction builder must also preflight funding and reveal with
+`testmempoolaccept`; Knots' token filter has an approximately 2^-64 accidental
+match edge case for any single-push OP_RETURN.
 
 ## License
 

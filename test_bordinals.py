@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pure-Python tests for the canonical DROPSTITCH codec and script template."""
+"""Pure-Python tests for the canonical BORDINALS codec and script template."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ import hashlib
 import random
 import unittest
 
-from dropstitch import (
+from bordinals import (
+    BORDINALS_SIGHASH,
     CHUNK_BYTES,
     CARRIER_INDEX_BYTES,
     CARRIER_TAG,
@@ -19,7 +20,7 @@ from dropstitch import (
     OP_PUSHDATA1,
     SCRIPT_BYTES,
     SERIALIZED_WITNESS_BYTES_MAX,
-    DropstitchError,
+    BordinalsError,
     build_manifest,
     build_script,
     carrier_count,
@@ -44,14 +45,14 @@ PUBKEY = bytes.fromhex(
 # The same point with odd-y encoding is also a valid compressed public key,
 # and is useful for testing key-binding without a crypto dependency.
 OTHER_PUBKEY = bytes((3,)) + PUBKEY[1:]
-# Structurally valid low-S DER values R=1, S=1, followed by SIGHASH_ALL.
-CANONICAL_TEST_SIGNATURE = bytes.fromhex("300602010102010101")
+# Structurally valid low-S DER values R=1, S=1, followed by unified SIGHASH_ALL.
+CANONICAL_TEST_SIGNATURE = bytes.fromhex("300602010102010121")
 _SECP256K1_HALF_ORDER_FOR_TEST = (
     0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141 // 2
 )
 
 
-class DropstitchCodecTest(unittest.TestCase):
+class BordinalsCodecTest(unittest.TestCase):
     def test_round_trip_boundary_lengths(self) -> None:
         rng = random.Random(0xD09A5717)
         lengths = [
@@ -118,6 +119,21 @@ class DropstitchCodecTest(unittest.TestCase):
             b"\x00\x20" + hashlib.sha256(script).digest(),
         )
 
+    def test_blake2b256_known_vector_is_not_truncated_blake2b512(self) -> None:
+        empty_expected = bytes.fromhex(
+            "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8"
+        )
+        abc_expected = bytes.fromhex(
+            "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319"
+        )
+        self.assertEqual(
+            hashlib.blake2b(b"", digest_size=32).digest(), empty_expected
+        )
+        self.assertEqual(
+            hashlib.blake2b(b"abc", digest_size=32).digest(), abc_expected
+        )
+        self.assertNotEqual(hashlib.blake2b(b"abc").digest()[:32], abc_expected)
+
     def test_olga_marker_detection(self) -> None:
         self.assertTrue(
             has_olga_marker(b"\x00\x20\x12\x34StAmP:" + b"\x00" * 24)
@@ -136,7 +152,10 @@ class DropstitchCodecTest(unittest.TestCase):
         self.assertEqual(manifest.first_input, 7)
         self.assertEqual(manifest.input_count, carrier_count(len(content)))
         self.assertEqual(manifest.pointer_vout, 2)
-        self.assertEqual(manifest.content_sha256, hashlib.sha256(content).digest())
+        self.assertEqual(
+            manifest.content_blake2b256,
+            hashlib.blake2b(content, digest_size=32).digest(),
+        )
         self.assertEqual(manifest.mime, "image/svg+xml")
         script = op_return_script(manifest_bytes)
         self.assertEqual(extract_op_return_payload(script), manifest_bytes)
@@ -165,7 +184,7 @@ class DropstitchCodecTest(unittest.TestCase):
         payload[-1] = 1
         script = build_script(bytes(payload), PUBKEY)
         manifest = build_manifest(content, "text/plain")
-        with self.assertRaisesRegex(DropstitchError, "non-zero carrier padding"):
+        with self.assertRaisesRegex(BordinalsError, "non-zero carrier padding"):
             decode_content(manifest, [script])
 
     def test_hash_mismatch_is_rejected(self) -> None:
@@ -175,9 +194,22 @@ class DropstitchCodecTest(unittest.TestCase):
             for index, item in enumerate(encode_payloads(content))
         ]
         manifest = bytearray(build_manifest(content, "text/plain"))
-        manifest[16] ^= 1  # First SHA256 byte in the packed v1 header.
-        with self.assertRaisesRegex(DropstitchError, "SHA256"):
+        manifest[16] ^= 1  # First BLAKE2b-256 byte in the packed v1 header.
+        with self.assertRaisesRegex(BordinalsError, "BLAKE2b-256"):
             decode_content(bytes(manifest), scripts)
+
+    def test_dropstitch_wire_namespace_is_not_bordinals(self) -> None:
+        manifest = bytearray(build_manifest(b"x", "text/plain"))
+        manifest[:4] = b"DSTC"
+        with self.assertRaisesRegex(BordinalsError, "not a BORDINALS manifest"):
+            parse_manifest(bytes(manifest))
+
+        script = bytearray(build_script(b"x", PUBKEY))
+        tag_offset = 6 * (2 + CHUNK_BYTES) + 3 + 1 + CARRIER_INDEX_BYTES + 1
+        self.assertEqual(script[tag_offset:tag_offset + 4], b"BOR1")
+        script[tag_offset:tag_offset + 4] = b"DST1"
+        with self.assertRaisesRegex(BordinalsError, "domain tag"):
+            parse_script(bytes(script))
 
     def test_mixed_spend_keys_are_rejected(self) -> None:
         content = b"z" * (MAX_PAYLOAD_BYTES + 1)
@@ -186,9 +218,9 @@ class DropstitchCodecTest(unittest.TestCase):
             build_script(payloads[0], PUBKEY),
             build_script(payloads[1], OTHER_PUBKEY, carrier_index=1),
         ]
-        with self.assertRaisesRegex(DropstitchError, "different spend key"):
+        with self.assertRaisesRegex(BordinalsError, "different spend key"):
             decode_content(build_manifest(content, "text/plain"), scripts)
-        with self.assertRaisesRegex(DropstitchError, "expected key"):
+        with self.assertRaisesRegex(BordinalsError, "expected key"):
             parse_script(scripts[0], expected_pubkey=OTHER_PUBKEY)
 
     def test_script_template_mutations_are_rejected(self) -> None:
@@ -210,7 +242,7 @@ class DropstitchCodecTest(unittest.TestCase):
 
         for number, malformed in enumerate(mutations):
             with self.subTest(mutation=number):
-                with self.assertRaises(DropstitchError):
+                with self.assertRaises(BordinalsError):
                     parse_script(bytes(malformed))
 
     def test_carrier_indices_domain_separate_repeated_payloads(self) -> None:
@@ -228,13 +260,13 @@ class DropstitchCodecTest(unittest.TestCase):
             decode_content(build_manifest(content, "application/octet-stream"), scripts),
             content,
         )
-        with self.assertRaisesRegex(DropstitchError, "non-canonical index"):
+        with self.assertRaisesRegex(BordinalsError, "non-canonical index"):
             decode_content(
                 build_manifest(content, "application/octet-stream"),
                 list(reversed(scripts)),
             )
 
-    def test_canonical_witness_decoding_requires_sighash_all(self) -> None:
+    def test_canonical_witness_decoding_requires_unified_sighash_all(self) -> None:
         content = b"signed framing"
         script = build_script(content, PUBKEY)
         manifest = build_manifest(content, "text/plain")
@@ -247,10 +279,13 @@ class DropstitchCodecTest(unittest.TestCase):
             content,
         )
 
-        wrong_sighash = CANONICAL_TEST_SIGNATURE[:-1] + b"\x02"
-        with self.assertRaisesRegex(DropstitchError, "SIGHASH_ALL"):
-            decode_witnesses(manifest, [[wrong_sighash, script]])
-        with self.assertRaisesRegex(DropstitchError, "signature and script"):
+        self.assertEqual(BORDINALS_SIGHASH, 0x21)
+        for wrong_sighash_byte in (0x01, 0x02, 0x20):
+            wrong_sighash = CANONICAL_TEST_SIGNATURE[:-1] + bytes([wrong_sighash_byte])
+            with self.subTest(sighash=wrong_sighash_byte):
+                with self.assertRaisesRegex(BordinalsError, "0x21"):
+                    decode_witnesses(manifest, [[wrong_sighash, script]])
+        with self.assertRaisesRegex(BordinalsError, "signature and script"):
             decode_witnesses(manifest, [[CANONICAL_TEST_SIGNATURE, b"extra", script]])
 
     def test_committed_decoder_requires_identical_funding_manifest(self) -> None:
@@ -276,7 +311,7 @@ class DropstitchCodecTest(unittest.TestCase):
             build_script(content + b"\x00", PUBKEY),
             script,
         )
-        with self.assertRaisesRegex(DropstitchError, "byte-identical"):
+        with self.assertRaisesRegex(BordinalsError, "byte-identical"):
             decode_committed_witnesses(
                 funding_manifest,
                 substituted,
@@ -285,32 +320,32 @@ class DropstitchCodecTest(unittest.TestCase):
             )
 
     def test_signature_item_rejects_noncanonical_der_and_high_s(self) -> None:
-        malformed = bytes.fromhex("30070202000102010101")
-        with self.assertRaises(DropstitchError):
+        malformed = bytes.fromhex("30070202000102010121")
+        with self.assertRaises(BordinalsError):
             validate_signature_item(malformed)
 
         high_s = (_SECP256K1_HALF_ORDER_FOR_TEST + 1).to_bytes(32, "big")
         high_s_signature = (
             b"\x30" + bytes((4 + 1 + len(high_s),))
-            + b"\x02\x01\x01\x02" + bytes((len(high_s),)) + high_s + b"\x01"
+            + b"\x02\x01\x01\x02" + bytes((len(high_s),)) + high_s + b"\x21"
         )
-        with self.assertRaisesRegex(DropstitchError, "low-S"):
+        with self.assertRaisesRegex(BordinalsError, "low-S"):
             validate_signature_item(high_s_signature)
 
     def test_invalid_public_keys_are_rejected(self) -> None:
         for pubkey in [b"", b"\x04" + b"\x00" * 32, b"\x02" + b"\xff" * 32]:
             with self.subTest(pubkey=pubkey.hex()):
-                with self.assertRaises(DropstitchError):
+                with self.assertRaises(BordinalsError):
                     build_script(b"x", pubkey)
 
     def test_bad_counts_and_empty_content_are_rejected(self) -> None:
-        with self.assertRaises(DropstitchError):
+        with self.assertRaises(BordinalsError):
             encode_payloads(b"")
-        with self.assertRaisesRegex(DropstitchError, "carrier_index"):
+        with self.assertRaisesRegex(BordinalsError, "carrier_index"):
             build_script(b"x", PUBKEY, carrier_index=1 << 32)
-        with self.assertRaisesRegex(DropstitchError, "input_count"):
+        with self.assertRaisesRegex(BordinalsError, "input_count"):
             build_manifest(b"x", "text/plain", input_count=2)
-        with self.assertRaisesRegex(DropstitchError, "fewer inputs"):
+        with self.assertRaisesRegex(BordinalsError, "fewer inputs"):
             decode_content(build_manifest(b"x", "text/plain"), [])
 
 
