@@ -50,7 +50,8 @@ better suited to tiny SVGs, pixel
 art, thumbnails, or content hashes.
 
 See [the BORDINALS protocol note](docs/BORDINALS.md) and
-[the SEQUIN protocol note](docs/SEQUIN.md) for the exact wire rules.
+[the SEQUIN protocol note](docs/SEQUIN.md) for the exact wire rules. The guarded
+transaction workflow is documented in [Mainnet workflow](docs/MAINNET.md).
 
 ## Quick start
 
@@ -64,9 +65,39 @@ python3 bordinals.py encode ./art.svg \
   --pubkey "$COMPRESSED_PUBKEY_HEX"
 ```
 
-The encoder prints the binary manifest, standard OP_RETURN script, carrier
-witnessScripts, and P2WSH scriptPubKeys as JSON. It deliberately does not manage
-private keys, construct funding transactions, or broadcast.
+The low-level encoder prints the binary manifest, standard OP_RETURN script,
+carrier witnessScripts, and P2WSH scriptPubKeys as JSON. It never touches a
+wallet or broadcasts.
+
+`bordinals_mint.py` is a separate, experimental transaction tool. It funds each
+opt-in recipient as an independent job, signs both a reveal and emergency
+refund before any broadcast is possible, and writes an integrity-checked
+mode-0600 schema-v2 plan. Every plan requires a sibling append-only execution
+journal named `PLAN.state.jsonl`; for example, `bordinals-plan.json` is paired
+with `bordinals-plan.json.state.jsonl`. The journal is also mode 0600. It
+durably records selected inputs before they are persistently locked, the
+committed plan binding, funding-attempt state before the submission RPC, and
+the irreversible reveal-or-refund choice. Missing, corrupt, truncated, or
+mismatched journal state causes broadcast and unlock to fail closed; read-only
+status can still inspect the immutable plan and chain without it.
+
+Commands are read-only unless `--execute` is supplied; preparation itself
+never broadcasts, and funding, reveal, and refund are separate steps with
+fresh policy checks. Minting is pinned to the exact latest audited mainnet
+build, `v29.4.1.knots20260508`. Status and emergency refund use a
+wallet-independent chain-identity gate so recovery is not disabled by an
+expired consent record, an unloaded wallet, or a later compatible node release.
+Move and back up a plan and its journal together. The journal is an
+owner-controlled crash-recovery and audit record, not a global anti-rollback
+mechanism: an operator who can restore files can restore old local state.
+Keep one canonical plan/journal directory and never execute copied pairs on
+multiple hosts.
+
+The recipient file is intentionally strict. External records must bind the
+fresh P2TR address, gift amount, artifact BLAKE2b-256, chain, consent reference,
+and expiration. A reference records the operator's workflow; it is not
+cryptographic proof of consent. The tool does not discover or attribute
+people's financial addresses.
 
 Decode consensus-validated BORDINALS witness stacks with:
 
@@ -127,6 +158,11 @@ BITCOIN_KNOTS_REPO=/path/to/bitcoin-knots \
 python3 sequin_regtest.py \
   --configfile=/path/to/bitcoin-knots/build-bordinals/test/config.ini \
   --loglevel=INFO
+
+BITCOIN_KNOTS_REPO=/path/to/bitcoin-knots \
+python3 bordinals_mint_regtest.py \
+  --configfile=/path/to/bitcoin-knots/build-bordinals/test/config.ini \
+  --loglevel=INFO
 ```
 
 The tests start two connected nodes with BLAKE2b/RDTS active and compiled Knots
@@ -139,6 +175,15 @@ otherwise injects Core policy. They prove:
 - the image reconstructs byte-for-byte and passes BLAKE2b-256 verification;
 - all temporary carriers are consumed into one spendable P2TR pointer; and
 - the pointer can be relayed, mined, and swept normally.
+
+The guarded-minter proof additionally uses the same Knots wallet/RPC boundary
+as the CLI. It proves that the default preview is inert, executed preparation
+creates the bound plan/journal pair, persistent input locks survive a node
+restart, a P2TR wallet coin receives the unified funding signature, a
+multi-carrier funding/reveal pair relays after a confirmation boundary, and a
+second CLI plan's independently pre-signed refund recovers every carrier into
+a wallet-owned P2TR output even after consent expires and the wallet is
+unloaded.
 
 Each proof also constructs a literal `<data> OP_DROP` P2WSH control. Knots
 rejects it from the mempool as `txn-datacarrier-nonstandard`, then accepts the
@@ -167,18 +212,24 @@ release, `v29.4.1.knots20260508`, at commit
 - The 5,024-byte SVG used four carriers, relayed across two default-policy
   nodes, reconstructed exactly, confirmed, and left a spendable P2TR pointer.
 - The 177-input/265,500-byte reveal relayed and was selected by the default
-  template at 297,223 serialized bytes and 319,405 WU.
-- The 221-input/331,500-byte reveal relayed at 371,088 serialized bytes and
-  398,682 WU. The 300 kB template target left it in the mempool, after which
+  template at about 297.2 kB and below 319.6 kWU.
+- The 221-input/331,500-byte reveal relayed at about 371.1 kB and below
+  398.8 kWU. The 300 kB template target left it in the mempool, after which
   explicit block inclusion proved consensus acceptance under RDTS' 800 kWU cap.
 - SEQUIN's 524-byte/131-input image proof still relayed, reconstructed, and
   swept successfully on the same release.
+- The guarded minter created wallet-funded transactions, matched Knots'
+  `UnifiedSighash` on an independent test vector, signed a P2TR funding coin,
+  relayed a multi-input recipient reveal, and exercised its confirmed-funding
+  emergency refund on two default-policy nodes.
 
 This demonstrates the tested revision and defaults; it does not promise a
 future release, differently configured peer, or miner will preserve the policy
-seam. A real transaction builder must also preflight funding and reveal with
-`testmempoolaccept`; Knots' token filter has an approximately 2^-64 accidental
-match edge case for any single-push OP_RETURN.
+seam. The minter statically checks Knots' Counterparty predicate and requires
+the exact funding/reveal and funding/refund packages to pass
+`testmempoolaccept` before it will save a broadcastable plan. Knots' token
+filter still has an approximately 2^-64 accidental-match edge case for any
+single-push OP_RETURN; a detected collision fails closed.
 
 ## License
 
