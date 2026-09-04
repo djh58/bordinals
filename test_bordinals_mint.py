@@ -1265,6 +1265,49 @@ class ExecutionSafetyTest(unittest.TestCase):
         methods = {method for method, _ in rpc.calls}
         self.assertFalse(methods & ReadOnlyRPC.MUTATING_METHODS)
 
+    def test_direct_prepare_preview_cannot_bypass_consent_validation(self) -> None:
+        plan = valid_plan()
+        recipient = copy.deepcopy(plan["entries"][0]["recipient"])
+        recipient["consent"]["expires_at"] = "2021-01-01T00:00:00Z"
+        rpc = RecordingRPC()
+        with self.assertRaisesRegex(MintError, "consent has expired"):
+            preview_preparation(
+                rpc,
+                content=b"<svg/>",
+                artifact_name="direct.svg",
+                mime="image/svg+xml",
+                recipients=[recipient],
+                chain="regtest",
+                fee_rate=Decimal("1"),
+                max_fee_rate=Decimal("10"),
+                max_carriers=177,
+                max_reveal_fee_sats=1_000_000,
+                max_total_fee_sats=5_000_000,
+                max_total_spend_sats=5_000_000,
+                consent_ack="I CONFIRM EVERY RECIPIENT OPTED IN",
+            )
+        self.assertEqual(rpc.calls, [])
+
+        recipient = copy.deepcopy(plan["entries"][0]["recipient"])
+        recipient["unexpected"] = True
+        with self.assertRaisesRegex(MintError, "unknown fields"):
+            preview_preparation(
+                rpc,
+                content=b"<svg/>",
+                artifact_name="direct.svg",
+                mime="image/svg+xml",
+                recipients=[recipient],
+                chain="regtest",
+                fee_rate=Decimal("1"),
+                max_fee_rate=Decimal("10"),
+                max_carriers=177,
+                max_reveal_fee_sats=1_000_000,
+                max_total_fee_sats=5_000_000,
+                max_total_spend_sats=5_000_000,
+                consent_ack="I CONFIRM EVERY RECIPIENT OPTED IN",
+            )
+        self.assertEqual(rpc.calls, [])
+
     def test_cli_broadcast_dispatches_checksum_and_execute(self) -> None:
         plan = valid_plan()
         with tempfile.TemporaryDirectory() as directory:

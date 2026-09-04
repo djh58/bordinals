@@ -1879,10 +1879,11 @@ def inspect_chain_identity(
 ) -> dict[str, Any]:
     """Identify the saved chain without depending on a wallet or RDTS policy.
 
-    Recovery and status deliberately use this narrower gate.  A signed refund
-    must remain usable after consent or RDTS expires and after the operator
-    upgrades Knots.  Mainnet's activation checkpoint distinguishes the
-    BLAKE2b/RDTS chain without pinning the current node release.
+    Recovery and status deliberately use this narrower gate so local version,
+    consent, and RDTS checks do not themselves disable an already-signed
+    refund. The exact refund still has to pass current relay policy. Mainnet's
+    activation checkpoint distinguishes the BLAKE2b/RDTS chain without pinning
+    the current node release.
     """
     if expected_chain not in {"main", "regtest"}:
         raise MintError("this experimental minter supports only main and regtest")
@@ -2584,17 +2585,66 @@ def _validate_prepare_parameters(
         raise MintError("artifact MIME type must be a string")
     if not isinstance(recipients, (list, tuple)) or not 1 <= len(recipients) <= MAX_RECIPIENTS:
         raise MintError(f"prepare requires 1..{MAX_RECIPIENTS} recipients")
+    current = datetime.now(timezone.utc)
+    seen_addresses: set[str] = set()
+    seen_references: set[str] = set()
     for index, recipient in enumerate(recipients):
         if not isinstance(recipient, dict):
             raise MintError(f"recipient {index} must be a JSON object")
-        if not isinstance(recipient.get("address"), str):
+        _require_exact_keys(
+            recipient,
+            required={"address", "gift_sats", "label", "consent"},
+            optional=set(),
+            description=f"recipient {index}",
+        )
+        address = recipient.get("address")
+        if not isinstance(address, str) or not address or address in seen_addresses:
             raise MintError(f"recipient {index} address is malformed")
+        seen_addresses.add(address)
         gift = recipient.get("gift_sats")
         if isinstance(gift, bool) or not isinstance(gift, int) or gift <= 0:
             raise MintError(f"recipient {index} gift_sats must be a positive integer")
+        label = recipient.get("label")
+        if not isinstance(label, str) or len(label) > 120:
+            raise MintError(f"recipient {index} label is malformed")
         consent = recipient.get("consent")
         mode = consent.get("mode") if isinstance(consent, dict) else None
-        if not isinstance(mode, str) or mode not in {"self", "reference"}:
+        if mode == "self":
+            _require_exact_keys(
+                consent,
+                required={"mode"},
+                optional=set(),
+                description=f"recipient {index} consent",
+            )
+        elif mode == "reference":
+            _require_exact_keys(
+                consent,
+                required={"mode", "reference", "obtained_at", "expires_at"},
+                optional=set(),
+                description=f"recipient {index} consent",
+            )
+            reference = consent.get("reference")
+            if (
+                not isinstance(reference, str)
+                or not reference
+                or len(reference) > 500
+                or reference in seen_references
+            ):
+                raise MintError(f"recipient {index} consent reference is malformed")
+            seen_references.add(reference)
+            obtained = _parse_utc_timestamp(
+                consent.get("obtained_at"), f"recipient {index} consent obtained_at"
+            )
+            expires = _parse_utc_timestamp(
+                consent.get("expires_at"), f"recipient {index} consent expires_at"
+            )
+            if obtained > current.replace(microsecond=0):
+                raise MintError(f"recipient {index} consent is dated in the future")
+            if expires <= current:
+                raise MintError(f"recipient {index} consent has expired")
+            if expires <= obtained:
+                raise MintError(f"recipient {index} consent expiry precedes consent")
+        else:
             raise MintError(f"recipient {index} consent is malformed")
     if not isinstance(chain, str) or chain not in {"main", "regtest"}:
         raise MintError("prepare chain must be main or regtest")

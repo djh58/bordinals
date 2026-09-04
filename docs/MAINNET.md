@@ -12,7 +12,9 @@ deployments, RDTS expiry, and sync state. Preparation also checks wallet
 capabilities. A later Knots version needs a new audited minting profile even if
 its version number is higher. Status and emergency refund intentionally use a
 narrower chain-identity check so an already-signed recovery is not disabled by
-an unloaded wallet, expired consent record, RDTS expiry, or node upgrade.
+those gates alone when the wallet is unloaded, consent or RDTS has expired, or
+the node was upgraded. Refund still runs a fresh exact policy preflight and can
+fail to relay after a policy change.
 Read-only status needs only the immutable plan and chain; executing the refund
 still requires its exact bound journal.
 
@@ -284,8 +286,9 @@ locally mutually exclusive even across an ambiguous RPC failure.
   Choose a realistic rate, reveal promptly after confirmation, and use only
   money you can afford to have temporarily stranded.
 - RDTS is temporary. Funding preparation and broadcast require seven days of
-  median-time headroom, and reveal checks activation again. Refund and status
-  keep working through the narrower chain-identity path after RDTS expiry.
+  median-time headroom, and reveal checks activation again. Status remains
+  available after RDTS expiry. The tool still permits the signed refund path,
+  but broadcasts it only if the exact transaction passes current relay policy.
 - On a detected preparation failure, the tool attempts to release and then
   reconcile only the exact newly selected wallet inputs. If cleanup cannot be
   confirmed, it exits with a safety error listing the exact remaining or

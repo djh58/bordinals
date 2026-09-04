@@ -85,8 +85,10 @@ Commands are read-only unless `--execute` is supplied; preparation itself
 never broadcasts, and funding, reveal, and refund are separate steps with
 fresh policy checks. Minting is pinned to the exact latest audited mainnet
 build, `v29.4.1.knots20260508`. Status and emergency refund use a
-wallet-independent chain-identity gate so recovery is not disabled by an
-expired consent record, an unloaded wallet, or a later compatible node release.
+wallet-independent chain-identity gate, so the tool does not reject recovery
+solely because consent expired, the wallet is unloaded, RDTS expired, or the
+node was upgraded. The exact refund must still pass the connected node's
+current relay policy.
 Move and back up a plan and its journal together. The journal is an
 owner-controlled crash-recovery and audit record, not a global anti-rollback
 mechanism: an operator who can restore files can restore old local state.
